@@ -32,7 +32,7 @@ Each document is annotated with ground truth skills from the ESCO (European Skil
 
 ## Models Compared
 
-1. **ModernBERT**: Answer.AI's ModernBERT-base model from Hugging Face
+1. **ModernBERT**: Using a combination of Answer.AI's ModernBERT-base and Nomic AI's modernbert-embed-base for embeddings
 2. **GPT-4o**: OpenAI's latest GPT model
 3. **LLaMA 3.1**: Meta's open-source large language model
 4. **Gemini 2.0 Pro**: Google's generative AI model

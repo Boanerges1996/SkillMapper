@@ -50,20 +50,29 @@ def main():
     parser.add_argument("--models", nargs="+", choices=["bert", "gpt", "gemini", "claude", "llama", "all"], 
                         default=["all"], help="Specify which models to include in the comparison")
     parser.add_argument("--data-limit", type=int, default=100, help="Limit the number of examples per data type")
+    parser.add_argument("--bert-only", action="store_true", help="Run only BERT model and skip API-based models")
     args = parser.parse_args()
     
     # Load environment variables
     load_dotenv()
     
-    # Check API keys
-    api_keys_available = check_api_keys()
-    if not api_keys_available:
-        logger.info("Continuing with available API keys...")
+    # Check API keys - only relevant if not using bert-only mode
+    api_keys_available = True
+    if not args.bert_only:
+        api_keys_available = check_api_keys()
+        if not api_keys_available:
+            logger.info("API keys missing. Use --bert-only flag to run only with BERT model.")
+            logger.info("Continuing with available API keys...")
     
     # Run the full pipeline or just the analysis
     if not args.skip_comparison:
         logger.info("Starting skill extraction comparison...")
-        run_comparison(models=args.models, data_limit=args.data_limit)
+        if args.bert_only:
+            # Override models arg if bert-only flag is set
+            logger.info("Running with BERT model only")
+            run_comparison(models=["bert"], data_limit=args.data_limit)
+        else:
+            run_comparison(models=args.models, data_limit=args.data_limit)
         logger.info("Skill extraction comparison complete.")
     
     logger.info("Starting analysis of results...")

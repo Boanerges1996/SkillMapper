@@ -283,6 +283,8 @@ def generate_research_findings(df: pd.DataFrame, output_file: str = "analysis_ou
         df: DataFrame with results
         output_file: Output file path
     """
+    # Handle case where only BERT model is present (no zero/few-shot comparison)
+    bert_only = len(df['model'].unique()) == 1 and 'ModernBERT' in df['model'].unique()
     # Create a model_shot column for analysis
     df['model_shot'] = df.apply(
         lambda row: f"{row['model']}" if row['shot_setting'] == 'N/A' 
@@ -443,7 +445,7 @@ def generate_research_findings(df: pd.DataFrame, output_file: str = "analysis_ou
                     f.write("the broader knowledge and context understanding of generative models may provide advantages.\n\n")
         
         # Zero-shot vs Few-shot analysis
-        if zero_vs_few_analysis:
+        if zero_vs_few_analysis and not bert_only:
             f.write("### Impact of Few-shot Examples\n\n")
             
             # Calculate average improvement across models
@@ -527,7 +529,7 @@ def generate_research_findings(df: pd.DataFrame, output_file: str = "analysis_ou
             f.write("This suggests that recent advances in generative AI are pushing the boundaries of what's possible in structured information extraction tasks.\n\n")
         
         # Add zero-shot vs few-shot conclusion if applicable
-        if zero_vs_few_analysis:
+        if zero_vs_few_analysis and not bert_only:
             better_shot = "few" if avg_f1_improvement > 0 else "zero"
             f.write(f"Regarding prompting strategies, our analysis shows that **{better_shot}-shot prompting** tends to yield better results on average. ")
             if better_shot == "few":
@@ -554,14 +556,14 @@ def generate_research_findings(df: pd.DataFrame, output_file: str = "analysis_ou
             f.write(f"The highest recall ({model_avg.loc[best_model_recall, 'recall']:.4f} from {best_model_recall}) exceeds the highest precision ({model_avg.loc[best_model_precision, 'precision']:.4f} from {best_model_precision}), ")
             f.write("suggesting that false negatives are less common than false positives in skill extraction across all models.\n\n")
         
-        if zero_vs_few_analysis:
+        if zero_vs_few_analysis and not bert_only:
             f.write("- **Prompting Strategy**: The choice between zero-shot and few-shot prompting should be made based on the specific model being used and validated empirically, as the optimal strategy varies across models.\n\n")
         
         f.write("### Future Work\n\n")
         f.write("Based on our findings, several promising directions for future research include:\n\n")
         f.write("- Developing ensemble methods that combine the strengths of both BERT and generative AI models\n")
         f.write("- Exploring domain-specific fine-tuning to improve performance on specific document types\n")
-        if zero_vs_few_analysis:
+        if zero_vs_few_analysis and not bert_only:
             f.write("- Investigating optimal example selection for few-shot prompting across different models\n")
             f.write("- Exploring the relationship between model size and the benefit of few-shot examples\n")
         f.write("- Examining the computational efficiency trade-offs between model types in production environments\n")
