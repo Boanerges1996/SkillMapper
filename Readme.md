@@ -63,7 +63,7 @@ This framework is designed for extracting and mapping skills to the [ESCO](https
 
 ### Overview
 
-This project includes a comprehensive comparison between BERT-based models (ModernBERT) and several Generative AI models (GPT-4o, LLaMA 3.1, Gemini, Claude) for the task of skill extraction from three types of documents:
+This project includes a comprehensive comparison between BERT-based models (Answer.AI's ModernBERT-base) and several Generative AI models (GPT-4o, LLaMA 3.1, Gemini, Claude) for the task of skill extraction from three types of documents:
 
 1. Course descriptions
 2. Job postings

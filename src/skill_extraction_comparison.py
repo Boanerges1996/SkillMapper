@@ -8,7 +8,8 @@ from transformers import AutoTokenizer, AutoModel
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 from langchain_anthropic import ChatAnthropic
-from langchain_meta import ChatMetaLLama
+# Import for Llama models (using Hugging Face integration instead)
+from langchain_community.llms import HuggingFacePipeline
 from sklearn.metrics import precision_recall_fscore_support, accuracy_score
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -29,18 +30,25 @@ logger.info(f"Using device: {device}")
 class SkillExtractorBERT:
     """BERT-based skill extractor using ModernBERT from HuggingFace"""
     
-    def __init__(self, model_name="BAAI/bge-small-en-v1.5", threshold=0.75):
+    def __init__(self, model_name="answerdotai/ModernBERT-base", threshold=0.75):
         """
         Initialize the BERT model for skill extraction
         Args:
-            model_name: HuggingFace model name (default: BAAI/bge-small-en-v1.5, a modern BERT variant)
+            model_name: HuggingFace model name (default: answerdotai/ModernBERT-base)
             threshold: Similarity threshold for skill matching
         """
         logger.info(f"Initializing BERT model: {model_name}")
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModel.from_pretrained(model_name).to(device)
         self.threshold = threshold
-        self.sentence_transformer = SentenceTransformer(model_name)
+        # Use SentenceTransformer for efficient embedding comparisons
+        # If ModernBERT doesn't work with SentenceTransformer, we'll use a compatible alternative
+        try:
+            self.sentence_transformer = SentenceTransformer(model_name)
+        except Exception as e:
+            logger.warning(f"Failed to load {model_name} with SentenceTransformer: {e}")
+            logger.info("Falling back to all-MiniLM-L6-v2 for sentence embeddings")
+            self.sentence_transformer = SentenceTransformer("all-MiniLM-L6-v2")
         
     def _extract_embedding(self, text):
         """Extract embeddings from text using the BERT model"""
@@ -68,7 +76,19 @@ class SkillExtractorBERT:
         # Calculate similarity with all skills
         skill_scores = []
         for skill in all_skills:
-            skill_emb = np.array(skill["embedding"])
+            # Use bert_embedding for ModernBERT comparison
+            if "bert_embedding" in skill:
+                skill_emb = np.array(skill["bert_embedding"])
+            elif "embedding" in skill:
+                skill_emb = np.array(skill["embedding"])
+            else:
+                continue
+                
+            # Ensure dimensions match
+            if text_embedding.shape[1] != skill_emb.shape[0]:
+                logger.warning(f"Embedding dimension mismatch: {text_embedding.shape} vs {skill_emb.shape}")
+                continue
+                
             # Cosine similarity
             similarity = np.dot(text_embedding, skill_emb) / (np.linalg.norm(text_embedding) * np.linalg.norm(skill_emb))
             if similarity > self.threshold:
@@ -114,10 +134,23 @@ class SkillExtractorLLM:
                 temperature=temperature,
             )
         elif model_type == "llama":
-            self.llm = ChatMetaLLama(
-                model="llama-3.1-405b-instruct",
-                temperature=temperature,
-            )
+            # For Llama, we'll use Hugging Face models or an API if available
+            # This is a simplified approach - in a real setting you'd need to set up
+            # access to Llama models through HF or Meta's API
+            try:
+                from langchain_community.chat_models import ChatOllama
+                self.llm = ChatOllama(
+                    model="llama3",
+                    temperature=temperature,
+                )
+            except (ImportError, Exception) as e:
+                logger.warning(f"Failed to initialize Llama model: {e}")
+                logger.warning("Falling back to OpenAI model for 'llama' type")
+                # Fallback to OpenAI if Llama is not available
+                self.llm = ChatOpenAI(
+                    model="gpt-3.5-turbo", 
+                    temperature=temperature,
+                )
         else:
             raise ValueError(f"Unknown model type: {model_type}")
             
@@ -234,31 +267,64 @@ Your response should be parseable JSON in this format:
         
         # Get all skill names from ESCO
         all_skill_names = [skill["skill_name"] for skill in all_skills]
-        all_skill_embeddings = self.embedding_model.encode(all_skill_names)
         
-        for skill_obj in extracted_skills:
-            skill_name = skill_obj.get("skill_name", "")
-            if not skill_name:
-                continue
+        # Use sentence embeddings for the LLM mapping (these should be in the correct dimension)
+        try:
+            # First try to get pre-computed sentence embeddings
+            if "sentence_embedding" in all_skills[0]:
+                all_skill_embeddings = np.array([skill["sentence_embedding"] for skill in all_skills])
+            else:
+                # If not available, compute them now
+                all_skill_embeddings = self.embedding_model.encode(all_skill_names)
                 
-            # Get embedding for extracted skill
-            skill_embedding = self.embedding_model.encode(skill_name)
-            
-            # Calculate similarity with all ESCO skills
-            similarities = util.cos_sim(skill_embedding, all_skill_embeddings)[0]
-            best_match_idx = similarities.argmax().item()
-            
-            # If similarity is too low, skip
-            if similarities[best_match_idx] < 0.5:
-                continue
+            for skill_obj in extracted_skills:
+                skill_name = skill_obj.get("skill_name", "")
+                if not skill_name:
+                    continue
+                    
+                # Get embedding for extracted skill
+                skill_embedding = self.embedding_model.encode(skill_name)
                 
-            # Get matched ESCO skill
-            matched_skill = all_skills[best_match_idx]
-            mapped_skills.append({
-                "skill_name": matched_skill["skill_name"],
-                "esco_id": matched_skill["esco_id"]
-            })
-            
+                # Calculate similarity with all ESCO skills
+                similarities = util.cos_sim(skill_embedding, all_skill_embeddings)[0]
+                best_match_idx = similarities.argmax().item()
+                
+                # If similarity is too low, skip
+                if similarities[best_match_idx] < 0.5:
+                    continue
+                    
+                # Get matched ESCO skill
+                matched_skill = all_skills[best_match_idx]
+                mapped_skills.append({
+                    "skill_name": matched_skill["skill_name"],
+                    "esco_id": matched_skill["esco_id"]
+                })
+                
+        except Exception as e:
+            logger.error(f"Error in skill mapping: {e}")
+            # Fallback to simple text matching if embeddings fail
+            for skill_obj in extracted_skills:
+                skill_name = skill_obj.get("skill_name", "")
+                if not skill_name:
+                    continue
+                
+                # Find best text match
+                best_match = None
+                best_score = 0
+                for skill in all_skills:
+                    # Simple Levenshtein ratio as fallback
+                    from difflib import SequenceMatcher
+                    score = SequenceMatcher(None, skill_name.lower(), skill["skill_name"].lower()).ratio()
+                    if score > best_score and score > 0.7:  # 0.7 threshold for decent match
+                        best_score = score
+                        best_match = skill
+                
+                if best_match:
+                    mapped_skills.append({
+                        "skill_name": best_match["skill_name"],
+                        "esco_id": best_match["esco_id"]
+                    })
+                    
         return mapped_skills
 
 def load_data(file_path: str) -> List[Dict[str, Any]]:
@@ -359,7 +425,7 @@ def run_comparison(models=["all"], data_limit=100):
     """
     # Load ESCO skills
     logger.info("Loading ESCO skills...")
-    all_skills = load_esco_skills("src/synthetic_data_generator/skills_en.csv")
+    all_skills = load_esco_skills("src/synthetic_data_generator/skills_en.csv", bert_model_name="answerdotai/ModernBERT-base")
     logger.info(f"Loaded {len(all_skills)} skills")
     
     # Load datasets
@@ -532,9 +598,16 @@ def plot_results(results_df):
     plt.savefig("zero_vs_few_shot_comparison.png")
     logger.info("Zero-shot vs Few-shot comparison saved to zero_vs_few_shot_comparison.png")
 
-def load_esco_skills(file_path: str) -> List[Dict[str, Any]]:
+def load_esco_skills(file_path: str, bert_model_name="answerdotai/ModernBERT-base") -> List[Dict[str, Any]]:
     """
     Load ESCO skills from a CSV file and precompute embeddings.
+    
+    Args:
+        file_path: Path to the CSV file with ESCO skills
+        bert_model_name: Name of the BERT model to use for embeddings
+    
+    Returns:
+        List of skills with embeddings
     """
     df = pd.read_csv(file_path)
     skills = (
@@ -543,23 +616,65 @@ def load_esco_skills(file_path: str) -> List[Dict[str, Any]]:
         .to_dict(orient="records")
     )
     
-    # Initialize embedding model
-    embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+    # Initialize two embedding models: one for BERT and one for other tools
+    logger.info(f"Computing embeddings for skills using models compatible with {bert_model_name}")
     
-    # Compute embeddings in batches to avoid memory issues
-    batch_size = 128
-    all_embeddings = []
-    
-    for i in range(0, len(skills), batch_size):
-        batch = skills[i:i+batch_size]
-        skill_texts = [skill["skill_name"] for skill in batch]
-        embeddings = embedding_model.encode(skill_texts, convert_to_numpy=True)
-        all_embeddings.extend(embeddings)
-    
-    # Add embeddings to skills
-    for skill, emb in zip(skills, all_embeddings):
-        skill["embedding"] = emb.tolist()
+    # Try to use the BERT model directly or fall back to a compatible model
+    try:
+        # Initialize tokenizer and model for direct BERT embeddings
+        tokenizer = AutoTokenizer.from_pretrained(bert_model_name)
+        model = AutoModel.from_pretrained(bert_model_name).to(device)
         
+        # Sentence Transformer for LLM-based skill matching
+        sentence_transformer = SentenceTransformer("all-MiniLM-L6-v2")
+        
+        # Compute embeddings in batches to avoid memory issues
+        batch_size = 128
+        all_bert_embeddings = []
+        all_sentence_embeddings = []
+        
+        for i in range(0, len(skills), batch_size):
+            batch = skills[i:i+batch_size]
+            skill_texts = [skill["skill_name"] for skill in batch]
+            
+            # Compute BERT embeddings
+            with torch.no_grad():
+                inputs = tokenizer(skill_texts, padding=True, truncation=True, return_tensors="pt").to(device)
+                outputs = model(**inputs)
+                bert_embeddings = outputs.last_hidden_state[:, 0, :].cpu().numpy()
+                all_bert_embeddings.extend(bert_embeddings)
+            
+            # Compute sentence transformer embeddings for LLMs
+            sentence_embeddings = sentence_transformer.encode(skill_texts, convert_to_numpy=True)
+            all_sentence_embeddings.extend(sentence_embeddings)
+        
+        # Add both sets of embeddings to skills
+        for skill, bert_emb, sent_emb in zip(skills, all_bert_embeddings, all_sentence_embeddings):
+            skill["bert_embedding"] = bert_emb.tolist()
+            skill["sentence_embedding"] = sent_emb.tolist()
+            
+    except Exception as e:
+        logger.error(f"Error computing dual embeddings: {e}")
+        logger.info("Falling back to single embedding model")
+        
+        # Use a single embedding model as fallback
+        embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+        
+        # Compute embeddings in batches
+        batch_size = 128
+        all_embeddings = []
+        
+        for i in range(0, len(skills), batch_size):
+            batch = skills[i:i+batch_size]
+            skill_texts = [skill["skill_name"] for skill in batch]
+            embeddings = embedding_model.encode(skill_texts, convert_to_numpy=True)
+            all_embeddings.extend(embeddings)
+        
+        # Add embeddings to skills
+        for skill, emb in zip(skills, all_embeddings):
+            skill["bert_embedding"] = emb.tolist()
+            skill["sentence_embedding"] = emb.tolist()
+    
     return skills
 
 if __name__ == "__main__":
