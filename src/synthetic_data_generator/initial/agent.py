@@ -69,7 +69,7 @@ def build_graph(llm):
 
     def load_esco_node(state):
         logging.info(f"{Fore.CYAN}🔍 Starting to load ESCO skills...")
-        all_skills = load_esco_skills("skills_en.csv")
+        all_skills = load_esco_skills("../skills_en.csv")
         logging.info(f"{Fore.GREEN}✅ Loaded {len(all_skills)} skills from ESCO.")
         return {"all_skills": all_skills}
 
