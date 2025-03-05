@@ -14,3 +14,9 @@ wheels/
 course_data.json
 cv_data.json
 job_data.json
+
+
+course.json
+cv.json
+job.json
+merged_dataset.csv
