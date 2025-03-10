@@ -1,25 +1,20 @@
 import json
 import os
-import re
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import warnings
-
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from dotenv import load_dotenv
 import logging
 import torch
-
 from sentence_transformers import SentenceTransformer, util
 import spacy
 
 # GPT models
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.chat_models import ChatOllama
-
 from pydantic import BaseModel, Field
 from difflib import SequenceMatcher
 import nltk
@@ -271,13 +266,8 @@ def sbert_token_level_skill_extraction(text: str, esco_skills: list) -> list:
       - Compute embeddings for all candidate chunks.
       - Use a dynamic cosine threshold and lexical/synonym checks.
     """
-    # 1. Extract noun phrases using spaCy
+
     noun_phrases = extract_noun_phrases(text)
-
-    # 2. Also split text into sentences (using nltk)
-    import nltk
-
-    nltk.download("punkt", quiet=True)  # Ensure the tokenizer is available
     sentences = nltk.sent_tokenize(text)
 
     # 3. Combine and deduplicate candidate phrases
