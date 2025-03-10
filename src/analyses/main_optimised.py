@@ -11,6 +11,7 @@ import logging
 import torch
 from sentence_transformers import SentenceTransformer, util
 import spacy
+from sentence_transformers import util
 
 # GPT models
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -40,6 +41,17 @@ def compute_rp_at_k_fuzzy(gt: set, pred: list, k=5, threshold=0.8) -> float:
         if any(is_close_match(p, g, threshold) for g in gt):
             correct_count += 1
     return correct_count / k if k > 0 else 0
+
+
+def compute_mrr_fuzzy_per_sample(gt: set, pred: list, threshold=0.7) -> float:
+    reciprocal_ranks = []
+    for g in gt:
+        for idx, p in enumerate(pred):
+            if is_close_match(p, g, threshold):
+                reciprocal_ranks.append(1 / (idx + 1))
+                break
+    # Take the best rank per sample
+    return max(reciprocal_ranks) if reciprocal_ranks else 0
 
 
 def compute_mrr_fuzzy(gt: set, pred: list, threshold=0.8):
@@ -259,53 +271,47 @@ def dynamic_cosine_threshold(similarities: np.ndarray) -> float:
 
 
 def sbert_token_level_skill_extraction(text: str, esco_skills: list) -> list:
-    """
-    Extract candidate skills using a combined approach:
-      - Extract noun phrases with spaCy.
-      - Also split the text into sentences.
-      - Compute embeddings for all candidate chunks.
-      - Use a dynamic cosine threshold and lexical/synonym checks.
-    """
-
     noun_phrases = extract_noun_phrases(text)
     sentences = nltk.sent_tokenize(text)
 
-    # 3. Combine and deduplicate candidate phrases
     candidate_phrases = list(set(noun_phrases + sentences))
-
-    # 4. Filter out very short phrases (optional heuristic)
     candidate_phrases = [phrase for phrase in candidate_phrases if len(phrase) > 3]
     if not candidate_phrases:
         return []
 
-    # 5. Compute embeddings for candidate phrases
     phrase_embeddings = embedding_model.encode(
         candidate_phrases, convert_to_numpy=True, normalize_embeddings=True
     )
 
-    # 6. Prepare ESCO skill embeddings (based on the preferred label)
     skill_texts = [skill["skill_name"] for skill in esco_skills]
     skill_embeddings = embedding_model.encode(
         skill_texts, convert_to_numpy=True, normalize_embeddings=True
     )
 
-    # 7. Compute cosine similarity matrix between candidate phrases and skills
     similarity_matrix = np.dot(phrase_embeddings, skill_embeddings.T)
 
-    extracted_skills = set()
+    # Use a dictionary to keep track of the highest similarity for each skill
+    extracted_skills = {}
     for i, candidate in enumerate(candidate_phrases):
         sims = similarity_matrix[i]
-        # Instead of using dynamic threshold, get top-k indices
-        top_indices = sims.argsort()[::-1][:10]  # top 10 candidates
+        top_indices = sims.argsort()[::-1][:10]
         for idx in top_indices:
-            # You can still check if similarity is above a minimal threshold
-            if sims[idx] < 0.5:  # minimal similarity to consider
+            if sims[idx] < 0.5:
                 continue
             skill_candidate = skill_texts[idx].lower()
             alt_labels = esco_skills[idx].get("alt_labels", [])
             if lexical_or_synonym_check(candidate, skill_candidate, alt_labels):
-                extracted_skills.add(skill_candidate)
-    return list(extracted_skills)
+                # Store the highest similarity score for the skill
+                if skill_candidate in extracted_skills:
+                    extracted_skills[skill_candidate] = max(
+                        extracted_skills[skill_candidate], sims[idx]
+                    )
+                else:
+                    extracted_skills[skill_candidate] = sims[idx]
+
+    # Sort skills by similarity score in descending order
+    sorted_skills = sorted(extracted_skills.items(), key=lambda x: x[1], reverse=True)
+    return [skill for skill, score in sorted_skills]
 
 
 # ------------------------------
@@ -346,15 +352,15 @@ def gpt_extract_skills_from_model(
     logging.info(f"Starting GPT extraction using {model_name}...")
     if model_name.lower() == "deepseek-r1":
         prompt = (
-            "Extract all explicitly mentioned skills from the following text. "
+            "Extract all explicitly mentioned skills from the following text, and those implicitly mentioned. "
             "Return ONLY a JSON object exactly in the following format: "
             '{"skills": ["skill1", "skill2", ...]}. '
-            "Do not include any chain-of-thought, explanations, or extra text. "
+            "Do not include any chain-of-thought, explanations, or extra text. list them in order of relevance."
             f"Text: '''{text}'''"
         )
     else:
         prompt = (
-            "Extract all explicitly mentioned skills from the following text and return a JSON object "
+            "Extract all explicitly mentioned skills from the following text, and those implicitly mentioned, list them in order of relevance, and return a JSON object "
             "with a key 'skills' mapping to a list of strings. Do not include any additional text. "
             f"Text: '''{text}'''"
         )
@@ -473,7 +479,9 @@ def evaluate_sample(sample, esco_skills):
     result["sbert_f1"] = f1
     # Instead of R@5, use RP@5:
     result["sbert_rp@5"] = compute_rp_at_k_fuzzy(gt_set, sbert_pred, k=5, threshold=0.8)
-    result["sbert_mrr"] = compute_mrr_fuzzy(gt_set, sbert_pred, threshold=0.8)
+    result["sbert_mrr"] = compute_mrr_fuzzy_per_sample(
+        gt_set, sbert_pred, threshold=0.7
+    )
     result["sbert_accuracy"] = compute_accuracy_continuous(
         set(gt_skills), sbert_pred, match_threshold=0.8
     )
@@ -490,7 +498,9 @@ def evaluate_sample(sample, esco_skills):
         result[f"{key_prefix}_rp@5"] = compute_rp_at_k_fuzzy(
             gt_set, pred, k=5, threshold=0.8
         )
-        result[f"{key_prefix}_mrr"] = compute_mrr_fuzzy(gt_set, pred, threshold=0.8)
+        result[f"{key_prefix}_mrr"] = compute_mrr_fuzzy_per_sample(
+            gt_set, pred, threshold=0.7
+        )
         result[f"{key_prefix}_accuracy"] = compute_accuracy_continuous(
             set(gt_skills), pred, match_threshold=0.8
         )
