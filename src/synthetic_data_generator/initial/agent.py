@@ -84,7 +84,7 @@ def build_graph(llm):
         logging.info(
             f"{Fore.MAGENTA}🎓 Generating course data using Gemini model: {llm.model}"
         )
-        total_course_titles = state.get("num_course_titles", 2500)
+        total_course_titles = state.get("num_course_titles", 200)
         # Use our stateful generator to obtain unique course titles in batches.
         course_titles = generate_unique_titles_stateful(
             generate_course_titles, llm, total=total_course_titles, batch_size=100
@@ -125,7 +125,7 @@ def build_graph(llm):
         logging.info(
             f"{Fore.MAGENTA}💼 Generating job data using Gemini model: {llm.model}"
         )
-        total_job_titles = state.get("num_job_titles", 2000)
+        total_job_titles = state.get("num_job_titles", 200)
         job_titles = generate_unique_titles_stateful(
             generate_job_titles, llm, total=total_job_titles, batch_size=100
         )
@@ -163,7 +163,7 @@ def build_graph(llm):
         logging.info(
             f"{Fore.MAGENTA}📝 Generating CV data using Gemini model: {llm.model}"
         )
-        total_cv_names = state.get("num_cv_names", 1400)
+        total_cv_names = state.get("num_cv_names", 200)
         cv_names = generate_unique_titles_stateful(
             lambda llm, num_titles, avoid: generate_cv_names(
                 llm, num_names=num_titles, avoid=avoid

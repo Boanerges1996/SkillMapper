@@ -8,25 +8,101 @@ from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
 from langchain.output_parsers import PydanticOutputParser
 from pydantic import BaseModel, validator
+import nltk
+from thefuzz import fuzz
+
+nltk.download("punkt_tab")
 
 # Initialize the embedding model
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 
 
+def chunk_text_into_sentences(text: str) -> List[str]:
+    return nltk.sent_tokenize(text)
+
+
+def get_relevant_skills_chunked(
+    context: str, skills: List[Dict[str, Any]], threshold: float = 0.50
+) -> List[Dict[str, Any]]:
+    """
+    Return all skills for which at least one sentence in the context
+    has a similarity >= threshold.
+    """
+
+    sentences = chunk_text_into_sentences(context)
+    sentence_embs = embedding_model.encode(sentences, convert_to_numpy=True)
+
+    def cosine_sim(a, b):
+        return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+
+    matched_skills = []
+    for skill in skills:
+        skill_emb = np.array(skill["embedding"])  # Combined embedding
+        max_sim = max(cosine_sim(skill_emb, sent_emb) for sent_emb in sentence_embs)
+        if max_sim >= threshold:
+            matched_skills.append(skill)
+    return matched_skills
+
+
+def fuzzy_match_skill_in_text(skill_name: str, text: str, threshold: int = 70) -> bool:
+    """
+    Return True if skill_name appears in text with a partial
+    ratio >= threshold.
+    """
+    score = fuzz.partial_ratio(skill_name.lower(), text.lower())
+    return score >= threshold
+
+
+def check_explicit_skills_fuzzy(
+    context: str, skills: List[Dict[str, Any]], threshold: int = 70
+) -> List[Dict[str, Any]]:
+    """
+    Return all skills that appear (even partially or paraphrased)
+    in the text by fuzzy matching.
+    """
+    matched_skills = []
+    for skill in skills:
+        if fuzzy_match_skill_in_text(skill["skill_name"], context, threshold=threshold):
+            matched_skills.append(skill)
+            continue
+
+        for alt_label in skill["alt_labels"]:
+            if fuzzy_match_skill_in_text(alt_label, context, threshold=threshold):
+                matched_skills.append(skill)
+                break
+    return matched_skills
+
+
 def load_esco_skills(file_path: str) -> List[Dict[str, Any]]:
-    """
-    Load ESCO skills from a CSV file and precompute embeddings.
-    """
     df = pd.read_csv(file_path)
-    skills = (
-        df[["preferredLabel", "conceptUri"]]
-        .rename(columns={"preferredLabel": "skill_name", "conceptUri": "esco_id"})
-        .to_dict(orient="records")
-    )
-    skill_texts = [skill["skill_name"] for skill in skills]
-    embeddings = embedding_model.encode(skill_texts, convert_to_numpy=True)
-    for skill, emb in zip(skills, embeddings):
-        skill["embedding"] = emb.tolist()
+
+    skills = []
+    for _, row in df.iterrows():
+        preferred = row.get("preferredLabel", "")
+        alt_labels_raw = row.get("altLabels", "")
+
+        alt_labels_list = []
+        if isinstance(alt_labels_raw, str):
+            alt_labels_list = [
+                lbl.strip() for lbl in alt_labels_raw.split("\n") if lbl.strip()
+            ]
+
+        skill_texts_for_embedding = [preferred] + alt_labels_list
+
+        combined_text = " ".join(skill_texts_for_embedding)
+        combined_embedding = embedding_model.encode(
+            combined_text, convert_to_numpy=True
+        )
+
+        skills.append(
+            {
+                "skill_name": preferred,
+                "esco_id": row.get("conceptUri", ""),
+                "alt_labels": alt_labels_list,
+                "embedding": combined_embedding.tolist(),
+            }
+        )
+
     return skills
 
 
@@ -77,7 +153,7 @@ def generate_course_prompt() -> PromptTemplate:
     instructions = course_parser.get_format_instructions()
     escaped_instructions = instructions.replace("{", "{{").replace("}", "}}")
     prompt_text = (
-        "Generate a JSON object for a course description that incorporates the following skills: {skills}.\n"
+        "Generate a JSON object for a course description that incorporates the following skills: {skills}, that explicitly mentions 90% of the skills and implicitly mentions 10% of the skills.\n"
         + escaped_instructions
         + "\nDo not include any markdown formatting or extra text."
     )
@@ -100,7 +176,7 @@ def generate_job_prompt() -> PromptTemplate:
     instructions = job_parser.get_format_instructions()
     escaped_instructions = instructions.replace("{", "{{").replace("}", "}}")
     prompt_text = (
-        "Generate a JSON object for a job description that incorporates the following skills: {skills}.\n"
+        "Generate a JSON object for a job description that incorporates the following skills: {skills}, that explicitly mentions 90% of the skills and implicitly mentions 10% of the skills.\n"
         + escaped_instructions
         + "\nDo not include any markdown formatting or extra text."
     )
@@ -134,7 +210,7 @@ def generate_cv_prompt() -> PromptTemplate:
     instructions = cv_parser.get_format_instructions()
     escaped_instructions = instructions.replace("{", "{{").replace("}", "}}")
     prompt_text = (
-        "Generate a JSON object for a CV that incorporates the following skills: {skills}.\n"
+        "Generate a JSON object for a CV that incorporates the following skills: {skills}, that explicitly mentions 90% of the skills and implicitly mentions 10% of the skills.\n"
         + escaped_instructions
         + "\nDo not include any markdown formatting or extra text."
     )
@@ -267,17 +343,50 @@ def generate_cv_names(
 def generate_course_example(
     all_skills: List[Dict[str, Any]], llm, course_title: str
 ) -> Dict[str, Any]:
-    selected_skills = get_relevant_skills(course_title, all_skills, top_k=15)
+    selected_skills_chunked = get_relevant_skills_chunked(
+        course_title, all_skills, threshold=0.50
+    )
+    selected_skills_fuzzy = check_explicit_skills_fuzzy(
+        course_title, all_skills, threshold=70
+    )
+
+    selected_skills = list(
+        {
+            s["esco_id"]: s for s in (selected_skills_chunked + selected_skills_fuzzy)
+        }.values()
+    )
+
     skill_names = [s["skill_name"] for s in selected_skills]
-    inferred_context = infer_context("course", selected_skills, llm)
-    extended_context = f"{inferred_context} Course Title: {course_title}."
+
     prompt = generate_course_prompt()
     chain = prompt | llm
     result = chain.invoke({"skills": ", ".join(skill_names)})
+    parsed_text = result.content
+
+    missing_skills = []
+    for skill_name in skill_names:
+        if not fuzzy_match_skill_in_text(skill_name, parsed_text, threshold=70):
+            missing_skills.append(skill_name)
+
+    # If any missing, do a rewrite pass
+    if missing_skills:
+        rewrite_prompt = PromptTemplate.from_template(
+            "The following text is missing these skills: {missing}. "
+            "Rewrite it to explicitly include them (using exact or near-exact wording). "
+            "Here is the text:\n\n{text}"
+        )
+        rewrite_chain = rewrite_prompt | llm
+        rewrite_result = rewrite_chain.invoke(
+            {"missing": ", ".join(missing_skills), "text": parsed_text}
+        )
+        parsed_text = rewrite_result.content
+
+    # Now parse the final text into your schema
     try:
-        parsed = course_parser.parse(result.content)
+        parsed = course_parser.parse(parsed_text)
     except Exception as e:
         raise ValueError(f"Course output parsing failed for '{course_title}': {e}")
+
     parsed.courseTitle = course_title
     return {
         "text": parsed.dict(),
@@ -291,13 +400,45 @@ def generate_course_example(
 def generate_job_example(
     all_skills: List[Dict[str, Any]], llm, job_title: str
 ) -> Dict[str, Any]:
-    selected_skills = get_relevant_skills(job_title, all_skills, top_k=15)
+    selected_skills_chunked = get_relevant_skills_chunked(
+        job_title, all_skills, threshold=0.50
+    )
+    selected_skills_fuzzy = check_explicit_skills_fuzzy(
+        job_title, all_skills, threshold=70
+    )
+
+    selected_skills = list(
+        {
+            s["esco_id"]: s for s in (selected_skills_chunked + selected_skills_fuzzy)
+        }.values()
+    )
+
     skill_names = [s["skill_name"] for s in selected_skills]
     inferred_context = infer_context("job", selected_skills, llm)
     extended_context = f"{inferred_context} Job Title: {job_title}."
     prompt = generate_job_prompt()
     chain = prompt | llm
+
     result = chain.invoke({"skills": ", ".join(skill_names)})
+
+    missing_skills = []
+    for skill_name in skill_names:
+        if not fuzzy_match_skill_in_text(skill_name, result.content, threshold=70):
+            missing_skills.append(skill_name)
+
+    if missing_skills:
+        rewrite_prompt = PromptTemplate.from_template(
+            "The following text is missing these skills: {missing}. "
+            "Rewrite it to explicitly include them (using exact or near-exact wording). "
+            "Here is the text:\n\n{text}"
+        )
+        rewrite_chain = rewrite_prompt | llm
+        rewrite_result = rewrite_chain.invoke(
+            {"missing": ", ".join(missing_skills), "text": result.content}
+        )
+
+        result = rewrite_result
+
     try:
         parsed = job_parser.parse(result.content)
     except Exception as e:
@@ -313,23 +454,52 @@ def generate_job_example(
 
 
 def generate_cv_example(
-    all_skills: List[Dict[str, Any]], llm, candidate_name: str
+    all_skills: List[Dict[str, Any]], llm, cv_name: str
 ) -> Dict[str, Any]:
-    selected_skills = get_relevant_skills(candidate_name, all_skills, top_k=15)
+    selected_skills_chunked = get_relevant_skills_chunked(
+        cv_name, all_skills, threshold=0.50
+    )
+    selected_skills_fuzzy = check_explicit_skills_fuzzy(
+        cv_name, all_skills, threshold=70
+    )
+
+    selected_skills = list(
+        {
+            s["esco_id"]: s for s in (selected_skills_chunked + selected_skills_fuzzy)
+        }.values()
+    )
+
     skill_names = [s["skill_name"] for s in selected_skills]
     inferred_context = infer_context("cv", selected_skills, llm)
-    extended_context = f"{inferred_context} Candidate Name: {candidate_name}."
+    extended_context = f"{inferred_context} Candidate Name: {cv_name}."
     prompt = generate_cv_prompt()
     chain = prompt | llm
+
     result = chain.invoke({"skills": ", ".join(skill_names)})
+
+    missing_skills = []
+    for skill_name in skill_names:
+        if not fuzzy_match_skill_in_text(skill_name, result.content, threshold=70):
+            missing_skills.append(skill_name)
+
+    # If any missing, do a rewrite pass
+    if missing_skills:
+        rewrite_prompt = PromptTemplate.from_template(
+            "The following text is missing these skills: {missing}. "
+            "Rewrite it to explicitly include them (using exact or near-exact wording). "
+            "Here is the text:\n\n{text}"
+        )
+        rewrite_chain = rewrite_prompt | llm
+        rewrite_result = rewrite_chain.invoke(
+            {"missing": ", ".join(missing_skills), "text": result.content}
+        )
+
+        result = rewrite_result
+
     try:
         parsed = cv_parser.parse(result.content)
     except Exception as e:
-        raise ValueError(f"CV output parsing failed for '{candidate_name}': {e}")
-    if "personalInformation" in parsed.dict():
-        parsed.personalInformation["name"] = candidate_name
-    else:
-        parsed.personalInformation = {"name": candidate_name, "contact": ""}
+        raise ValueError(f"CV output parsing failed for '{cv_name}': {e}")
     return {
         "text": parsed.dict(),
         "skills": [

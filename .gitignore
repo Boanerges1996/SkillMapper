@@ -21,3 +21,8 @@ cv.json
 job.json
 merged_dataset.csv
 evaluation_results.csv
+finetuned_sentence_transformer
+special_tokens_map.json
+tokenizer_config.json
+finetuned_bert.pth
+vocab.txt
